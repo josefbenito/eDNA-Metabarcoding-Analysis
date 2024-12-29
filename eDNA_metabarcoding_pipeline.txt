@@ -1,0 +1,591 @@
+eDNA metabarcoding pipeline:
+
+Rename the raw fastq.gz files by executing,
+for file in *.gz; do newfile=$(echo "$file" | awk -F "_" '{print $1"_"$2"_"$3"_"$5"_"$6"_"$7}' | sed 's/ //g'); mv -- "$file" "$newfile"; done
+
+Get QC metrics by executing script 'seqkit stats *.fastq.gz -a' inside the external drive folder containing raw data
+
+Copy all raw renamed fastq.gz files from external drive to asax super computer by executing 'scp /Volumes/External/Metabarcoding_Raw_Data/*.gz uahjbb001@asax.asc.edu:/home/uahjbb001/Metabarcoding_Raw_Data'
+
+Generate the QC reports for all raw fastq.gz files by executing the 'DADA2_QC_script.R' script in asax,
+#!/bin/bash
+module load R/4.1.0
+
+R CMD BATCH DADA2_QC_script.R
+printf "%s\n" "QC reports generated successfully!"
+
+DADA2_QC_script.R
+"library(dada2); packageVersion("dada2")
+path <- "/home/uahjbb001/Metabarcoding_Raw_Data"
+list.files(path)
+fnFs <- sort(list.files(path, pattern="_R1_001.fastq.gz", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_R2_001.fastq.gz", full.names = TRUE))
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+pdffn = "QC1_R1.pdf"
+pdf(file=pdffn, width=24, height=10)
+plotQualityProfile(fnFs[1:49])
+dev.off()
+
+pdffn = "QC1_R2.pdf"
+pdf(file=pdffn, width=24, height=10)
+plotQualityProfile(fnRs[1:49])
+dev.off()"
+Similarly, execute a batch script to generate QC report for all samples.
+
+Qiime2 (in asax):
+
+Create the manifest file 'eDNA_pe-33-manifest.tsv' with three columns, 'Sample-id', 'forward-absolute-filepath', and 'reverse-absolute-filepath'. Sample-id contains sample names and other columns contains the file path, /home/uahjbb001/Metabarcoding_Raw_Data/*_R1/R2_001.fastq.gz. Copy the manifest file to asax super computer.
+
+Execute the Qiime2 import data and cutadapat script as a batch script,
+#!/bin/bash
+source /home/uahjbb001/.bashrc
+source /apps/profiles/modules_asax.sh.dyn
+module load qiime2/2023.9 
+conda activate qiime2-amplicon-2023.9  
+
+qiime tools import --type 'SampleData[PairedEndSequencesWithQuality]' --input-path eDNA_pe-33-manifest.tsv --output-path paired-end-demux.qza --input-format PairedEndFastqManifestPhred33V2
+qiime cutadapt trim-paired --i-demultiplexed-sequences paired-end-demux.qza --p-front-f GGTCAACAAATCATAAAGATATTGG --p-front-r GGWACTAATCAATTTCCAAATCC --p-match-read-wildcards --p-match-adapter-wildcards --p-times 3 --p-overlap 10 --p-minimum-length 50 --p-discard-untrimmed --p-cores 9 --o-trimmed-sequences demux-paired-end-trimmed-fonly.qza --verbose
+qiime cutadapt trim-paired --i-demultiplexed-sequences demux-paired-end-trimmed-fonly.qza --p-adapter-f GGATTTGGAAATTGATTAGTWCC --p-adapter-r CCAATATCTTTATGATTTGTTGACC --p-match-read-wildcards --p-match-adapter-wildcards --p-times 3 --p-overlap 10 --p-minimum-length 50 --p-cores 9 --o-trimmed-sequences trimmed-seqs.qza --verbose
+qiime demux summarize --i-data trimmed-seqs.qza --o-visualization trimmed-seqs.qzv
+
+Execute the Qiime2 dada2 denoise script as a batch script,
+qiime dada2 denoise-paired --i-demultiplexed-seqs trimmed-seqs.qza --p-trunc-len-f 0 --p-trunc-len-r 0 --p-trim-left-f 0 --p-trim-left-r 0 --p-n-threads 9 --p-n-reads-learn 1000000 --o-table table.qza --o-representative-sequences rep-seqs.qza --o-denoising-stats denoising-stats.qza --verbose
+qiime tools export --input-path table.qza --output-path Feature_table/
+biom convert -i Feature_table/feature-table.biom -o Feature_table/feature-table.tsv --to-tsv
+
+mkCOInr Classifier (in laptop): 
+
+Commands for a quick installation of the mkCOInr conda environment and dependencies,
+conda create --name mkcoinr python=3.9 -y
+conda activate mkcoinr
+
+python3 -m pip install cutadapt
+conda install -c bioconda blast -y
+conda install -c bioconda vsearch -y
+pip install nsdpy
+
+Download the mkCOInr working folder by executing git clone https://github.com/meglecz/mkCOInr
+
+Then download the latest release of COInr database from Zenodo at https://zenodo.org/record/7898363, unzip, and rename the database folder. Execute,
+wget https://zenodo.org/record/7898363/files/COInr_2023_05_03.tar.gz
+tar -zxvf COInr_2023_05_03.tar.gz
+rm COInr_2023_05_03.tar.gz
+mv COInr_2023_05_03 COInr
+
+Download a list of taxa occurring in the Hawaii islands,
+1. Go to https://www.gbif.org/ and click Get data --> Occurrences
+2. On the left panel under Occurrences, click Advanced
+3. For Occurrence status, click Present
+4. Scroll down to Location and click State province. Search 'state' and select to display a list of taxa on the right. 
+5. Scroll down to Taxon and click Scientific name. Search "Animalia" and select to display a list of Animalia taxa from the chosen location on the right. 
+6. Click on Map on the right panel to confirm the occurrence on the chosen location
+7. Then, click on Download and download the taxa table using the Species list option
+8. Once the table is downloaded as a csv file, rename the file as .tsv, and convert the table to a tab-separated-value table.
+9. Then, copy and paste the entire column 'family' into a new worksheet and remove duplicates
+10. Rename the header 'family' to 'taxon_name' and save the table as 'State_animalia_families.tsv' in the mkCOInr/data/example folder
+
+Select sequences for a list of Animalia taxa with a minimum taxonomic rank (i.e., family). Execute,
+perl scripts/select_taxa.pl -taxon_list data/example/State_animalia_families.tsv -tsv COInr/COInr.tsv -taxonomy COInr/taxonomy.tsv -min_taxlevel family -outdir tutorial/select_taxa -out State_animalia_COInr_selected.tsv
+
+Select region using the bait_fas option. Execute,
+perl scripts/select_region.pl -tsv tutorial/select_taxa/State_animalia_COInr_selected.tsv -outdir tutorial/select_region/bait_fas -e_pcr 0 -bait_fas data/one_seq_per_order_658-metazoa-trimmed.fasta -tcov 0.8 -identity 0.7
+
+Dereplicate the sequences. Execute,
+perl scripts/dereplicate.pl -tsv tutorial/select_region/bait_fas/trimmed.tsv -outdir tutorial/dereplicate -out dereplicated_trimmed_sequences.tsv
+
+Format the database to qiime formats. Execute,
+perl scripts/format_db.pl -tsv tutorial/dereplicate/dereplicated_trimmed_sequences.tsv -taxonomy COInr/taxonomy.tsv -outfmt qiime -outdir COInr/qiime_state -out COInr_qiime_state
+
+Copy the qiime database files to asax super computer. Execute the Qiime2 mkCOInr classify script as a batch script (if classify using Qiime),
+qiime tools import --type 'FeatureData[Sequence]' --input-path COInr_qiime_state_trainseq.fasta --output-path ref-fasta-state.qza
+qiime tools import --type 'FeatureData[Taxonomy]' --input-format HeaderlessTSVTaxonomyFormat --input-path COInr_qiime_state_taxon.txt --output-path ref-taxonomy-state.qza
+qiime feature-classifier fit-classifier-naive-bayes --i-reference-reads ref-fasta-state.qza --i-reference-taxonomy ref-taxonomy-state.qza --o-classifier mkCOInr_state_classifier.qza --verbose
+qiime feature-classifier classify-sklearn --i-classifier mkCOInr_state_classifier.qza --i-reads rep-seqs.qza --o-classification taxonomy_mkCOInr_state.qza --verbose
+
+Combine the taxonomy table with the ASV count table:
+qiime feature-table transpose --i-table table.qza --o-transposed-feature-table transposed-table.qza
+qiime metadata tabulate --m-input-file rep-seqs.qza --m-input-file taxonomy.qza --m-input-file transposed-table.qza --o-visualization merged-data.qzv
+qiime tools export --input-path merged-data.qzv --output-path merged-data
+
+Normalize feature table and add FASTA sequences at end:
+
+import pandas as pd
+import os
+
+def process_pollinator_data(file_path, output_path):
+    # Load the dataset with low_memory set to False to handle large files
+    data = pd.read_csv(file_path, sep='\t', header=1, low_memory=False)
+
+    # Identify columns starting with 'EB' and 'Neg'
+    eb_columns = [col for col in data.columns if col.startswith("EB")]
+    neg_columns = [col for col in data.columns if col.startswith("Neg")]
+
+    # Calculate the max of all 'EB' and 'Neg' columns together for each row
+    data['Max_EB_Neg'] = data[eb_columns + neg_columns].max(axis=1)
+
+    # Subtract Max_EB_Neg from each cell (excluding the '#OTUID' column)
+    adjusted_data = data.copy()
+    adjusted_data.iloc[:, 1:] = adjusted_data.iloc[:, 1:].subtract(data['Max_EB_Neg'], axis=0)
+
+    # Replace negative values with zero
+    adjusted_data.iloc[:, 1:] = adjusted_data.iloc[:, 1:].clip(lower=0)
+
+    # Move 'EB' and 'Neg' columns to the right end of the file
+    other_columns = [col for col in adjusted_data.columns if col not in eb_columns + neg_columns]
+    adjusted_data = adjusted_data[other_columns + eb_columns + neg_columns]
+
+    # Remove the 'Max_EB_Neg' column from the final output
+    adjusted_data = adjusted_data.drop(columns=['Max_EB_Neg'])
+
+    # Save the adjusted dataset to a new CSV file
+    adjusted_data.to_csv(output_path, index=False)
+
+# Example usage
+file_path = "feature-table.tsv"  # Input file path
+output_path = "State_pollinator_feature_table_normalized.csv"  # Output file path
+process_pollinator_data(file_path, output_path)
+
+def parse_fasta(fasta_file_path):
+    """
+    Parse a FASTA file into a dictionary where keys are sequence headers and values are sequences.
+    """
+    fasta_dict = {}
+    with open(fasta_file_path, 'r') as file:
+        header = None
+        sequence_lines = []
+        for line in file:
+            if line.startswith('>'):
+                if header:
+                    # Save the previous record
+                    fasta_dict[header] = ''.join(sequence_lines)
+                # Start a new record
+                header = line[1:].strip()
+                sequence_lines = []
+            else:
+                sequence_lines.append(line.strip())
+        if header:
+            # Save the last record
+            fasta_dict[header] = ''.join(sequence_lines)
+    return fasta_dict
+
+def update_feature_table_with_fasta(csv_file_path, fasta_file_path, output_file_path):
+    """
+    Add corresponding FASTA sequences to the normalized feature table.
+    """
+    # Load the normalized CSV
+    normalized_data = pd.read_csv(csv_file_path)
+
+    # Parse the FASTA file into a dictionary
+    fasta_dict = parse_fasta(fasta_file_path)
+
+    # Map the FASTA sequences to the first column of the CSV
+    normalized_data['FASTA_Sequence'] = normalized_data.iloc[:, 0].map(fasta_dict)
+
+    # Save the updated dataset to a new CSV file
+    normalized_data.to_csv(output_file_path, index=False)
+    print(f"Updated feature table saved to {output_file_path}")
+
+# Example usage
+csv_file_path = "State_pollinator_feature_table_normalized.csv"  # Path to the normalized CSV file
+fasta_file_path = "dna-sequences.fasta"  # Path to the FASTA file
+output_file_path = "State_pollinator_feature_table_normalized.csv_with_FASTA.csv"  # Output file path
+
+update_feature_table_with_fasta(csv_file_path, fasta_file_path, output_file_path)
+
+os.remove('Hawaii_pollinator_2024_feature_table_normalized.csv')
+
+Taxonomy classification using MegaBlast:
+
+# Merge qiime formatted FASTA sequence and taxonomy files
+from Bio import SeqIO
+
+# Paths to your input files
+fasta_file = "COInr_qiime_animalia_all_trainseq.fasta"
+taxonomy_file = "COInr_qiime_animalia_all_taxon.txt"
+output_fasta_file = "COInr_qiime_animalia_all_trainseq_modified.fasta"
+
+# Parse the taxonomy file into a dictionary
+taxonomy_dict = {}
+with open(taxonomy_file, 'r') as tax_file:
+    for line in tax_file:
+        parts = line.strip().split("\t")
+        if len(parts) == 2:
+            # Remove spaces from the taxonomic classification
+            taxonomy_dict[parts[0]] = parts[1].replace(" ", "")
+
+# Read the FASTA file and replace headers
+with open(output_fasta_file, 'w') as output_fasta:
+    for record in SeqIO.parse(fasta_file, "fasta"):
+        # Replace the header with only the taxonomy if it exists in the taxonomy dictionary
+        if record.id in taxonomy_dict:
+            taxonomy = taxonomy_dict[record.id]
+            record.id = taxonomy  # Set the taxonomic classification as the new ID
+            record.description = ""  # Clear the description to avoid duplication
+        # Write the updated record to the output file
+        SeqIO.write(record, output_fasta, "fasta")
+
+print(f"Modified FASTA file written to: '{output_fasta_file}'.")
+
+# Generate mkCOInr blast database files
+import subprocess
+
+# Define the bash script as a string
+bash_script = """
+#!/bin/bash
+makeblastdb -in COInr_qiime_animalia_all_trainseq_modified.fasta -input_type fasta -out mkCOInr_COI_Qiime_Animalia_derepl_test/mkCOInr_COI_Qiime_Animalia_derepl_test -dbtype nucl
+"""
+
+# Execute the bash script
+try:
+    result = subprocess.run(["bash", "-c", bash_script], capture_output=True, text=True, check=True)
+    print("Bash Script Output:\n", result.stdout)
+    print("Database files generated and stored in 'mkCOInr_COI_Qiime_Animalia_derepl_test' folder.")
+except subprocess.CalledProcessError as e:
+    print("Error occurred:\n", e.stderr)
+
+# Run Megablast search against mkCOInr database
+# Define the bash script as a string
+bash_script = """
+#!/bin/bash
+blastn -db mkCOInr_COI_Qiime_Animalia_derepl_test/mkCOInr_COI_Qiime_Animalia_derepl_test -query dna-sequences.fasta -outfmt "10 qaccver saccver pident qcovhsp evalue" -perc_identity 98 -qcov_hsp_perc 90 -out dna-sequences_mkCOInr_COI_Qiime_Animalia_derepl_test_all_sig_hits.csv
+"""
+
+# Execute the bash script
+try:
+    result = subprocess.run(["bash", "-c", bash_script], capture_output=True, text=True, check=True)
+    print("Bash Script Output:\n", result.stdout)
+    print("Megablast results saved in 'dna-sequences_mkCOInr_COI_Qiime_Animalia_derepl_test_all_sig_hits.csv'.")
+except subprocess.CalledProcessError as e:
+    print("Error occurred:\n", e.stderr)
+
+# Megablast results processing steps
+import pandas as pd
+import numpy as np
+import os
+
+# Load the file directly (replace 'file_object' with the actual file object)
+data = pd.read_csv('dna-sequences_mkCOInr_COI_Qiime_Animalia_derepl_test_all_sig_hits.csv', header=None)
+
+# Remove duplicates based on columns 0 and 1
+cleaned_data = data.drop_duplicates(subset=[0, 1])
+
+# Sort the cleaned data by column 0
+sorted_data = cleaned_data.sort_values(by=0)
+
+# Save the sorted and cleaned data to a new CSV file
+sorted_data.to_csv("deduped_data.csv", index=False, header=False)
+
+print("Sorted and deduped data has been saved to 'deduped_data.csv'.")
+
+# Step 1: Read the CSV file (without header)
+df = pd.read_csv('deduped_data.csv', header=None)
+
+# Step 2: Split Column 2 (index 1) by semicolon and expand into separate columns
+df_split = df[1].str.split(';', expand=True)
+
+# Step 3: Clean up only columns 2 through 7 (index 1 through 6)
+for col in range(0, 6):  # Loop through columns 2 to 7 (index 1 to 6)
+    # Check for "__" and remove anything before it
+    df_split[col] = df_split[col].str.split('__').str[1]
+    # Remove anything after the first "_"
+    df_split[col] = df_split[col].str.split('_').str[0]
+
+# Step 4: Combine the original Column 1 (index 0) with the cleaned split columns and Columns 3, 4, and 5
+df_combined = pd.concat([df[0], df_split, df[2], df[3], df[4]], axis=1)
+
+# Step 5: Retain only the rows where column 0 (index 0) has duplicates
+df_combined = df_combined[df_combined[0].duplicated(keep=False)]
+
+# Step 6: Save the result to a new CSV file
+df_combined.to_csv('deduped_data_splitted_cleaned.csv', index=False, header=False)
+
+# Print a message indicating the completion of the task
+print("The deduped data has been processed and saved to 'deduped_data_splitted_cleaned.csv'.")
+
+# Step 1: Read the CSV file (without header)
+df = pd.read_csv('deduped_data_splitted_cleaned.csv', header=None)
+
+# Step 6: Check if column 8 (index 7) exists before processing it
+if 7 in df:
+    df[7] = df[7].str.split('__').str[1]
+
+# Step 7: Save the result to a new CSV file
+df.to_csv('deduped_data_species_splitted_cleaned.csv', index=False, header=False)
+
+# Print a message indicating the completion of the task
+print("The species column of deduped data has been processed and saved to 'deduped_data_species_splitted_cleaned.csv'.")
+
+# Function to remove anything after the second underscore
+def remove_after_second_underscore(s):
+    # Ensure s is a string
+    if isinstance(s, str):
+        # Find the first underscore
+        first_underscore_index = s.find('_')
+        
+        # If the first underscore exists, find the second one starting after the first
+        if first_underscore_index != -1:
+            second_underscore_index = s.find('_', first_underscore_index + 1)
+            if second_underscore_index != -1:
+                # Return the substring up to the second underscore
+                return s[:second_underscore_index]
+    # If there are fewer than two underscores or s is not a string, return the original string
+    return s
+
+# Step 1: Read the CSV file (without header)
+df = pd.read_csv('deduped_data_species_splitted_cleaned.csv', header=None)
+
+# Step 2: Apply the function to column 8 (index 7) to remove anything after the second underscore
+df[7] = df[7].apply(lambda x: remove_after_second_underscore(x))
+
+# ADDITIONAL LINE: Replace underscores with spaces in column 8 (index 7)
+df[7] = df[7].str.replace('_', ' ')
+
+# Step 3: Save the result to a new CSV file
+df.to_csv('deduped_data_all_splitted_cleaned.csv', index=False, header=False)
+
+# Print a message indicating the completion of the task
+print("All columns of deduped data has been processed and saved to 'deduped_data_all_splitted_cleaned.csv'.")
+
+def remove_redundant_rows_based_on_subsequence(data, columns):
+    """
+    Removes rows where the values in the specified columns are a subsequence of another row.
+
+    Parameters:
+        data (pd.DataFrame): The input dataframe.
+        columns (list): List of column indices or names to consider for subsequence comparison.
+
+    Returns:
+        pd.DataFrame: The cleaned dataframe with redundant rows removed.
+    """
+    to_keep = []
+    for i in range(len(data)):
+        current_row = data.iloc[i, columns]
+        is_unique = True
+        for j in range(len(data)):
+            if i != j:
+                comparison_row = data.iloc[j, columns]
+                # Check if current_row is a subsequence of comparison_row
+                if all(
+                    pd.isna(current_row[k]) or current_row[k] == comparison_row[k]
+                    for k in range(len(columns))
+                ):
+                    is_unique = False
+                    break
+        if is_unique:
+            to_keep.append(i)
+    return data.iloc[to_keep]
+
+def remove_redundant_rows_based_on_column_0(data):
+    """
+    Removes redundant rows within groups defined by duplicates in column 0.
+    
+    Parameters:
+        data (pd.DataFrame): The input dataframe.
+    
+    Returns:
+        pd.DataFrame: The cleaned dataframe with redundant rows removed within groups.
+    """
+    cleaned_data = []  # Use a list to collect cleaned groups
+    for _, group in data.groupby(0):  # Group by column 0
+        group_cleaned = remove_redundant_rows_based_on_subsequence(group, list(range(8)))
+        if not group_cleaned.empty:  # Only include non-empty groups
+            cleaned_data.append(group_cleaned)
+    return pd.concat(cleaned_data, ignore_index=True) if cleaned_data else pd.DataFrame(columns=data.columns)
+
+# Example usage
+if __name__ == "__main__":
+    # Read the CSV file (adjust header=None if the file has no headers)
+    data = pd.read_csv("deduped_data_all_splitted_cleaned.csv", header=None)  # Replace "data.csv" with your file name
+
+    # Remove redundant rows within groups defined by duplicates in column 0
+    cleaned_data = remove_redundant_rows_based_on_column_0(data)
+
+    # Save the cleaned data without column numbers as headers
+    cleaned_data.to_csv("unique_data_all_splitted_cleaned.csv", index=False, header=False)  # Set header=False to avoid column numbers
+    print("Redundant rows removed. Unique data saved to 'unique_data_all_splitted_cleaned.csv'.")
+
+def filter_max_difference(csv_file):
+    """
+    Reads 'csv_file' (no header) into a DataFrame. Groups by values of column 0 (index 0),
+    and for each group, retains rows whose column 8 (index 8) is within 0.5 of the max.
+    Works on pandas versions that do NOT support 'include_groups'.
+    """
+    # 1. Load the CSV file without headers
+    data = pd.read_csv(csv_file, header=None)
+
+    # 2. Convert column 8 to numeric
+    data[8] = pd.to_numeric(data[8], errors='coerce')
+
+    # 3. Separate the grouping column (index 0)
+    group_col = data[0]          # Series of group labels
+    data_no_group = data.drop(columns=0)  # Remove column 0 from the DataFrame
+
+    # 4. Define a function to filter within each group
+    def filter_group(group_df, group_val):
+        # group_df has columns [1, 2, 3, ... 8, ...] but no column 0
+        max_value = group_df[8].max()
+        # Keep rows where column 8 >= max_value - 0.5
+        filtered = group_df[group_df[8] >= (max_value - 0.5)].copy()
+        # If you need to re-add the group label as column 0, do so here:
+        filtered.insert(0, 0, group_val)
+        return filtered
+
+    # 5. Group by the 'group_col' (the Series), not by a column in data_no_group
+    filtered_data = (
+        data_no_group
+        .groupby(group_col, group_keys=False)
+        .apply(lambda g: filter_group(g, g.name))
+    )
+
+    return filtered_data
+
+# Example usage
+if __name__ == "__main__":
+    csv_file = "unique_data_all_splitted_cleaned.csv"
+    filtered_data = filter_max_difference(csv_file)
+
+    # Save or display the filtered data
+    filtered_data.to_csv("filtered_data_all_splitted_cleaned.csv", index=False, header=False)
+    print("Rows within 0.5 of the max in column 8 retained per group. Saved to 'filtered_data_all_splitted_cleaned.csv'.")
+
+# Specify the file paths
+input_file = "filtered_data_all_splitted_cleaned.csv"  # Input CSV file without a header
+output_file = "filtered_data_all_splitted_cleaned_with_header.csv"  # Output CSV file with the header
+
+# Define the new header row
+new_header = [
+    "Feature ID",
+    "mkCOInr kingdom name",
+    "mkCOInr phylum name",
+    "mkCOInr class name",
+    "mkCOInr order name",
+    "mkCOInr family name",
+    "mkCOInr genus name",
+    "mkCOInr species name",
+    "Identity",
+    "Coverage",
+    "e-value"
+]
+
+# Read the input CSV file without a header
+data = pd.read_csv(input_file, header=None)
+
+# Assign the new header to the dataframe
+data.columns = new_header
+
+# Save the dataframe to a new CSV file with the header
+data.to_csv(output_file, index=False)
+
+print(f"The file has been updated with header row and saved as {output_file}.")
+
+# Load the datasets
+filtered_output_file = "filtered_data_all_splitted_cleaned_with_header.csv"  # Input file
+hawaii_species_file = "Hawaii_animalia_species_list.tsv"  # Reference file
+
+# Read the input files
+filtered_data = pd.read_csv(filtered_output_file)
+hawaii_species_list = pd.read_csv(hawaii_species_file, sep="\t")
+
+# Perform lookups and add occurrence columns
+filtered_data['GBIF family occurrence'] = filtered_data['mkCOInr family name'].apply(
+    lambda family_name: (
+        '' if pd.isna(family_name) or family_name.strip() == '' else
+        'PRESENT' if family_name in hawaii_species_list['family'].values else
+        'ABSENT'
+    )
+)
+
+filtered_data['GBIF genus occurrence'] = filtered_data['mkCOInr genus name'].apply(
+    lambda genus_name: (
+        '' if pd.isna(genus_name) or genus_name.strip() == '' else
+        'PRESENT' if genus_name in hawaii_species_list['genus'].values else
+        'ABSENT'
+    )
+)
+
+filtered_data['GBIF species occurrence'] = filtered_data['mkCOInr species name'].apply(
+    lambda species_name: (
+        '' if pd.isna(species_name) or species_name.strip() == '' else
+        'PRESENT' if species_name in hawaii_species_list['species'].values else
+        'ABSENT'
+    )
+)
+
+# Rearrange the columns to place the new ones in the desired order
+columns_to_rearrange = ['GBIF family occurrence', 'GBIF genus occurrence', 'GBIF species occurrence']
+rearranged_columns = (
+    filtered_data.columns.difference(columns_to_rearrange, sort=False).tolist() + columns_to_rearrange
+)
+
+filtered_data = filtered_data[rearranged_columns]
+
+# Save the updated dataset to an Excel file
+output_file = "filtered_output_with_gbif_occurrence.xlsx"
+filtered_data.to_excel(output_file, index=False, sheet_name='GBIF_Occurrence')
+
+print(f"Updated dataset saved to {output_file}")
+
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment
+
+# Assuming `input_file` is the in-memory file object or path provided
+input_file = "filtered_output_with_gbif_occurrence.xlsx"  # Replace with the variable holding the uploaded file
+sheet_name = "GBIF_Occurrence"
+
+# Load the Excel file into a pandas DataFrame
+data = pd.read_excel(input_file, sheet_name=sheet_name)
+
+# Save the DataFrame back to an Excel file to work with openpyxl
+temp_file_path = "temp_file.xlsx"
+data.to_excel(temp_file_path, index=False, sheet_name=sheet_name)
+
+# Open the workbook and select the sheet
+workbook = load_workbook(temp_file_path)
+sheet = workbook[sheet_name]
+
+# Define styles
+present_fill = PatternFill(start_color="90EE90", end_color="90EE90", fill_type="solid")  # Light green
+absent_fill = PatternFill(start_color="F08080", end_color="F08080", fill_type="solid")  # Light red
+bold_font = Font(bold=True)
+center_alignment = Alignment(wrap_text=True, horizontal="center")
+
+# Apply bold and wrap text to the header row
+for cell in sheet[1]:
+    cell.font = bold_font
+    cell.alignment = center_alignment
+
+# Identify columns with GBIF occurrence data
+gbif_columns = ["GBIF family occurrence", "GBIF genus occurrence", "GBIF species occurrence"]
+header_row = list(sheet.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+columns_indices = [header_row.index(col) + 1 for col in gbif_columns]
+
+# Apply highlighting to GBIF occurrence columns
+for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row):
+    for idx in columns_indices:
+        cell = row[idx - 1]
+        if cell.value == "PRESENT":
+            cell.fill = present_fill
+        elif cell.value == "ABSENT":
+            cell.fill = absent_fill
+
+# Adjust column widths based on content (excluding header row)
+for column in sheet.columns:
+    max_length = 0
+    column_letter = column[0].column_letter  # Get the column letter (e.g., 'A', 'B')
+    for cell in column[1:]:  # Exclude the header row
+        try:
+            if cell.value:
+                max_length = max(max_length, len(str(cell.value)))
+        except:
+            pass
+    adjusted_width = max_length + 2  # Add padding
+    sheet.column_dimensions[column_letter].width = adjusted_width
+
+# Save the updated file
+highlighted_file_path = "processed_data_with_gbif_occurrence_highlighted_styled.xlsx"
+workbook.save(highlighted_file_path)
+
+os.remove('temp_file.xlsx')
+
+print(f"File saved at: {highlighted_file_path}")
